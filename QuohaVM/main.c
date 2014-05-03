@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct Cell Cell;
 typedef struct VM   VM;
@@ -18,6 +19,7 @@ enum OPCODE {
     opGOSUB,
     opHALT,
     opJMP,
+    opJNZ,
     opNOOP,
     opPANIC,
     opRTRN,
@@ -60,6 +62,7 @@ struct VM {
     size_t sizeOfCore;
     size_t sizeOfDataStack;
     size_t sizeOfReturnStack;
+    unsigned long ticks;
     Cell   core[3];
 }; // struct VM
 
@@ -72,11 +75,27 @@ Cell *cell_from_offset(size_t offset);
 Cell *cell_from_text(const char *text);
 const char *cell_type_as_text(enum DATATYPE type);
 
-
 VM           *vm_new(int kiloCells, int kiloDataStack, int kiloReturnStack);
 void          vm_dump_state(VM *vm);
+Cell         *vm_pop(VM *vm, Cell *save);
 enum VMRESULT vm_run(VM *vm);
 enum VMRESULT vm_set_program_counter(VM *vm, size_t address);
+
+struct {
+    // consider gperf for going the other way
+    enum OPCODE op;
+    const char *text;
+} opAsText[] = {
+    {opDATA  , "data" },
+    {opGOSUB , "gosub"},
+    {opHALT  , "halt" },
+    {opJMP   , "jmp"  },
+    {opJNZ   , "jnz"  },
+    {opNOOP  , "noop" },
+    {opPANIC , "panic"},
+    {opRTRN  , "rtrn" },
+    {opYIELD , "yield"},
+};
 
 const char *cell_type_as_text(enum DATATYPE type) {
     static char buffer[8];
@@ -94,21 +113,25 @@ const char *cell_type_as_text(enum DATATYPE type) {
 
 const char *opcode_as_text(enum OPCODE op) {
     static char buffer[8];
-    switch (op) {
-        case opDATA:  return "data";
-        case opGOSUB: return "gosub";
-        case opHALT:  return "halt";
-        case opJMP:   return "jmp";
-        case opNOOP:  return "noop";
-        case opPANIC: return "panic";
-        case opRTRN:  return "rtrn";
-        case opYIELD: return "yield";
+    if (opDATA <= op && op <= opYIELD) {
+        if (opAsText[op].op != op) {
+            printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
+            printf(". . .:\tenum OPCODE not in sync with opAsText\n");
+            printf(". . .:\tinvalid op is %d\n", op);
+            printf(". . .:\tarray   op is %d\n", opAsText[op].op);
+            exit(2);
+        }
+        return opAsText[op].text;
     }
+    printf(".warn:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
+    printf(". . .:\tenum OPCODE not in sync with opAsText\n");
+    printf(". . .:\tinvalid op is %d\n", op);
     sprintf(buffer, "0x%04x", op);
     return buffer;
 }
 
 void vm_dump_state(VM *vm) {
+    printf(". . .:\t%-18s == %8lu\n", "ticks", vm->ticks);
     printf(". . .:\t%-18s == %8ld\n", "ip", vm->instructionPointer - vm->core);
     //printf(". . .:\t%-18s == %8ld\n", "sizeOfCore", vm->sizeOfCore);
     //printf(". . .:\t%-18s == %8ld\n", "sizeOfData", vm->sizeOfDataStack);
@@ -153,6 +176,8 @@ VM *vm_new(int kiloCells, int kiloDataStack, int kiloReturnStack) {
 
     VM *vm = malloc(sizeof(*vm) + sizeOfCore + sizeOfDataStack + sizeOfReturnStack);
 
+    vm->ticks              = 0;
+
     vm->sizeOfCore         = sizeOfCore;
     vm->startOfCore        = vm->core;
     vm->endOfCore          = vm->startOfCore        + sizeOfCore;
@@ -176,9 +201,6 @@ VM *vm_new(int kiloCells, int kiloDataStack, int kiloReturnStack) {
         cell->op           = opPANIC;
         cell->type         = dtText;
         cell->data.text    = "a blast from the past!";
-        cell->op           = opGOSUB;
-        cell->type         = dtAddress;
-        cell->data.address = vm->endOfCore - 1;
     }
     for (Cell *cell = vm->startOfDataStack; cell < vm->endOfDataStack; cell++) {
         cell->op           = opDATA;
@@ -194,8 +216,33 @@ VM *vm_new(int kiloCells, int kiloDataStack, int kiloReturnStack) {
     return vm;
 }
 
+Cell *vm_pop(VM *vm, Cell *save) {
+    Cell *c = 0;
+    if (vm->dataStack >= vm->startOfDataStack) {
+        if (vm->dataStack->type != dtAddress) {
+            printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
+            printf(". . .:\tinvalid data stack (does not point to a cell)\n");
+        } else {
+            c = vm->dataStack->data.address;
+            if (save) {
+                memcpy(save, c, sizeof(*save));
+            }
+            vm->dataStack--;
+        }
+    }
+    return c;
+}
+
 enum VMRESULT vm_run(VM *vm) {
     for (;;) {
+        vm->ticks++;
+        if (vm->ticks > 5) {
+            printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
+            printf(". . .:\ttimer expired\n");
+            vm_dump_state(vm);
+            return vmrPANIC;
+        }
+
         vm->instructionPointer = vm->programCounter++;
         if (vm->instructionPointer >= vm->endOfCore) {
             printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
@@ -204,6 +251,8 @@ enum VMRESULT vm_run(VM *vm) {
             return vmrPANIC;
         }
 
+        Cell *c[3];
+        Cell save[3];
         switch (vm->instructionPointer->op) {
             case opDATA:
                 printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
@@ -218,12 +267,12 @@ enum VMRESULT vm_run(VM *vm) {
                     return vmrPANIC;
                 } else if (vm->instructionPointer->type != dtAddress) {
                     printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
-                    printf(". . .:\tinvalid instructon (opType s/b address)\n");
+                    printf(". . .:\tinvalid instruction (opType s/b address)\n");
                     vm_dump_state(vm);
                     return vmrPANIC;
                 } else if (vm->instructionPointer->data.address < vm->startOfCore || vm->instructionPointer->data.address >= vm->endOfCore) {
                     printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
-                    printf(". . .:\tinvalid instructon (jump out of bounds)\n");
+                    printf(". . .:\tinvalid instruction (jump out of bounds)\n");
                     vm_dump_state(vm);
                     return vmrPANIC;
                 }
@@ -245,6 +294,49 @@ enum VMRESULT vm_run(VM *vm) {
                     return vmrPANIC;
                 }
                 vm->programCounter = vm->core + vm->instructionPointer->data.offset;
+                continue;
+            case opJNZ:
+                c[0] = vm_pop(vm, save + 0);
+                if (!c[0]) {
+                    printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
+                    printf(". . .:\tstack underflow (data)\n");
+                    vm_dump_state(vm);
+                    return vmrPANIC;
+                } else if (vm->instructionPointer->type != dtAddress) {
+                    printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
+                    printf(". . .:\tinvalid instructon (opType s/b offset)\n");
+                    vm_dump_state(vm);
+                    return vmrPANIC;
+                }
+                switch (save->type) {
+                    case dtAddress:
+                        if (save->data.address) {
+                            vm->programCounter = vm->core + vm->instructionPointer->data.offset;
+                        }
+                        break;
+                    case dtInteger:
+                        if (save->data.integer) {
+                            vm->programCounter = vm->core + vm->instructionPointer->data.offset;
+                        }
+                        break;
+                    case dtNull:
+                        break;
+                    case dtNumber:
+                        if (save->data.number) {
+                            vm->programCounter = vm->core + vm->instructionPointer->data.offset;
+                        }
+                        break;
+                    case dtOffset:
+                        if (save->data.offset) {
+                            vm->programCounter = vm->core + vm->instructionPointer->data.offset;
+                        }
+                        break;
+                    case dtText:
+                        if (save->data.text) {
+                            vm->programCounter = vm->core + vm->instructionPointer->data.offset;
+                        }
+                        break;
+                }
                 continue;
             case opNOOP:
                 continue;
