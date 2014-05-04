@@ -29,6 +29,11 @@ enum OPCODE {
 enum VMRESULT {
     vmrOKAY = 0,
     vmrFAIL,
+    vmrDSINVALIDCELL,
+    vmrDSOVERFLOW,
+    vmrDSUNDERFLOW,
+    vmrRSOVERFLOW,
+    vmrRSUNDERFLOW,
     vmrPANIC,
 };
 
@@ -46,7 +51,7 @@ struct Cell {
 }; // struct Cell
 
 // core
-//  [ 0x0000 --> 0x???? ] endOfCore [ returnStack --> <-- dataStack ] endOfStack
+//  [ 0x0000 --> 0x???? ] endOfCore [ startOfDataStack --> <-- startOfReturnStack ] endOfStack
 //
 struct VM {
     Cell  *instructionPointer;
@@ -56,12 +61,9 @@ struct VM {
     Cell  *startOfCore;
     Cell  *endOfCore;
     Cell  *startOfDataStack;
-    Cell  *endOfDataStack;
     Cell  *startOfReturnStack;
-    Cell  *endOfReturnStack;
     size_t sizeOfCore;
-    size_t sizeOfDataStack;
-    size_t sizeOfReturnStack;
+    size_t sizeOfStack;
     unsigned long ticks;
     Cell   core[3];
 }; // struct VM
@@ -77,7 +79,7 @@ const char *cell_type_as_text(enum DATATYPE type);
 
 VM           *vm_new(int kiloCells, int kiloDataStack, int kiloReturnStack);
 void          vm_dump_state(VM *vm);
-Cell         *vm_pop(VM *vm, Cell *save);
+enum VMRESULT vm_pop(VM *vm, Cell *save);
 enum VMRESULT vm_run(VM *vm);
 enum VMRESULT vm_set_program_counter(VM *vm, size_t address);
 
@@ -134,17 +136,13 @@ void vm_dump_state(VM *vm) {
     printf(". . .:\t%-18s == %8lu\n", "ticks", vm->ticks);
     printf(". . .:\t%-18s == %8ld\n", "ip", vm->instructionPointer - vm->core);
     //printf(". . .:\t%-18s == %8ld\n", "sizeOfCore", vm->sizeOfCore);
-    //printf(". . .:\t%-18s == %8ld\n", "sizeOfData", vm->sizeOfDataStack);
-    //printf(". . .:\t%-18s == %8ld\n", "sizeOfReturnStack", vm->sizeOfReturnStack);
+    //printf(". . .:\t%-18s == %8ld\n", "sizeOfStack", vm->sizeOfStack);
     printf(". . .:\t%-18s == %p\n", "startOfCore", vm->startOfCore);
     printf(". . .:\t%-18s == %p\n", "ip", vm->instructionPointer);
-    //printf(". . .:\t%-18s == %p\n", "endOfCore", vm->endOfCore);
     printf(". . .:\t%-18s == %p\n", "startOfDataStack", vm->startOfDataStack);
     printf(". . .:\t%-18s == %p\n", "dataStack", vm->dataStack);
-    //printf(". . .:\t%-18s == %p\n", "endOfDataStack", vm->endOfDataStack);
-    printf(". . .:\t%-18s == %p\n", "startOfReturnStack", vm->startOfReturnStack);
     printf(". . .:\t%-18s == %p\n", "returnStack", vm->returnStack);
-    printf(". . .:\t%-18s == %p\n", "endOfReturnStack", vm->endOfReturnStack);
+    printf(". . .:\t%-18s == %p\n", "startOfReturnStack", vm->startOfReturnStack);
     printf(". . .:\t%-18s == %s\n", "opCode", opcode_as_text(vm->instructionPointer->op));
     printf(". . .:\t%-18s == %s\n", "opData", cell_type_as_text(vm->instructionPointer->type));
     switch (vm->instructionPointer->type) {
@@ -167,14 +165,13 @@ void vm_dump_state(VM *vm) {
             printf(". . .:\t%-18s == %p\n", "opValue", vm->instructionPointer->data.text);
             break;
     }
-}
 
+}
 VM *vm_new(int kiloCells, int kiloDataStack, int kiloReturnStack) {
     size_t sizeOfCore        = kiloCells       * 1024;
-    size_t sizeOfDataStack   = kiloDataStack   * 1024;
-    size_t sizeOfReturnStack = kiloReturnStack * 1024;
+    size_t sizeOfStack       = kiloDataStack   * 1024;
 
-    VM *vm = malloc(sizeof(*vm) + sizeOfCore + sizeOfDataStack + sizeOfReturnStack);
+    VM *vm = malloc(sizeof(*vm) + sizeOfCore + sizeOfStack);
 
     vm->ticks              = 0;
 
@@ -182,15 +179,13 @@ VM *vm_new(int kiloCells, int kiloDataStack, int kiloReturnStack) {
     vm->startOfCore        = vm->core;
     vm->endOfCore          = vm->startOfCore        + sizeOfCore;
 
-    vm->sizeOfDataStack    = sizeOfDataStack;
-    vm->startOfDataStack   = vm->endOfCore;
-    vm->dataStack          = vm->startOfDataStack;
-    vm->endOfDataStack     = vm->startOfDataStack   + sizeOfDataStack;
+    vm->sizeOfStack        = sizeOfStack;
 
-    vm->sizeOfReturnStack  = sizeOfReturnStack;
-    vm->startOfReturnStack = vm->endOfDataStack;
-    vm->returnStack        = vm->startOfReturnStack;
-    vm->endOfReturnStack   = vm->startOfReturnStack + sizeOfReturnStack;
+    vm->startOfDataStack   = vm->endOfCore;
+    vm->dataStack          = vm->startOfDataStack - 1;
+
+    vm->startOfReturnStack = vm->startOfDataStack + sizeOfStack;
+    vm->returnStack        = vm->startOfReturnStack + 1;
 
     vm->programCounter     = vm->core;
     vm->instructionPointer = vm->core;
@@ -202,12 +197,7 @@ VM *vm_new(int kiloCells, int kiloDataStack, int kiloReturnStack) {
         cell->type         = dtText;
         cell->data.text    = "a blast from the past!";
     }
-    for (Cell *cell = vm->startOfDataStack; cell < vm->endOfDataStack; cell++) {
-        cell->op           = opDATA;
-        cell->type         = dtAddress;
-        cell->data.address = 0;
-    }
-    for (Cell *cell = vm->startOfReturnStack; cell < vm->endOfReturnStack; cell++) {
+    for (Cell *cell = vm->startOfDataStack; cell <= vm->startOfReturnStack; cell++) {
         cell->op           = opDATA;
         cell->type         = dtAddress;
         cell->data.address = 0;
@@ -216,21 +206,57 @@ VM *vm_new(int kiloCells, int kiloDataStack, int kiloReturnStack) {
     return vm;
 }
 
-Cell *vm_pop(VM *vm, Cell *save) {
-    Cell *c = 0;
-    if (vm->dataStack >= vm->startOfDataStack) {
-        if (vm->dataStack->type != dtAddress) {
-            printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
-            printf(". . .:\tinvalid data stack (does not point to a cell)\n");
-        } else {
-            c = vm->dataStack->data.address;
-            if (save) {
-                memcpy(save, c, sizeof(*save));
-            }
-            vm->dataStack--;
-        }
+// always leave dataStack pointing at the top of the stack
+//
+enum VMRESULT vm_pop(VM *vm, Cell *save) {
+    if (vm->dataStack < vm->startOfDataStack) {
+        printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
+        printf(". . .:\tstack underflow (data)\n");
+        return vmrDSUNDERFLOW;
+    } else if (save) {
+        memcpy(save, vm->dataStack, sizeof(*save));
     }
-    return c;
+
+    vm->dataStack--;
+
+    return vmrOKAY;
+}
+
+// always leave dataStack pointing at the top of the stack
+//
+enum VMRESULT vm_push(VM *vm, Cell *cell) {
+    // is there room for another cell on the stack?
+    //
+    vm->dataStack++;
+    if (vm->dataStack >=  vm->returnStack) {
+        vm->dataStack--;
+        printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
+        printf(". . .:\tstack overflow (data)\n");
+        return vmrDSOVERFLOW;
+    } else if (cell) {
+        memcpy(vm->dataStack, cell, sizeof(*cell));
+    } else {
+        vm->dataStack->type = dtNull;
+    }
+
+    return vmrOKAY;
+}
+
+// always leave returnStack pointing to the top of the stack
+//
+enum VMRESULT vm_rspush(VM *vm, Cell *address) {
+    vm->returnStack--;
+    if (vm->returnStack <= vm->dataStack) {
+        vm->returnStack++;
+        printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
+        printf(". . .:\tstack overflow (return stack)\n");
+        vm_dump_state(vm);
+        return vmrPANIC;
+    }
+    vm->returnStack->op           = opDATA;
+    vm->returnStack->type         = dtAddress;
+    vm->returnStack->data.address = address;
+    return vmrOKAY;
 }
 
 enum VMRESULT vm_run(VM *vm) {
@@ -260,12 +286,7 @@ enum VMRESULT vm_run(VM *vm) {
                 vm_dump_state(vm);
                 return vmrPANIC;
             case opGOSUB:
-                if (vm->returnStack >= vm->endOfReturnStack) {
-                    printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
-                    printf(". . .:\tstack overflow (return stack)\n");
-                    vm_dump_state(vm);
-                    return vmrPANIC;
-                } else if (vm->instructionPointer->type != dtAddress) {
+                if (vm->instructionPointer->type != dtAddress) {
                     printf("panic:\t%s %s %d\n", __FILE__, __FUNCTION__, __LINE__);
                     printf(". . .:\tinvalid instruction (opType s/b address)\n");
                     vm_dump_state(vm);
@@ -276,11 +297,10 @@ enum VMRESULT vm_run(VM *vm) {
                     vm_dump_state(vm);
                     return vmrPANIC;
                 }
-                // push the return address
-                vm->returnStack->op           = opDATA;
-                vm->returnStack->type         = dtAddress;
-                vm->returnStack->data.address = vm->programCounter;
-                vm->returnStack++;
+                if (!vm_rspush(vm, vm->programCounter)) {
+                    vm_dump_state(vm);
+                    return vmrPANIC;
+                }
                 // and jump to the address in the instruction
                 vm->programCounter = vm->instructionPointer->data.address;
                 continue;
